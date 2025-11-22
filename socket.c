@@ -29,6 +29,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <errno.h>
 #include "log.h"
 #include "binn.h"
 
@@ -38,7 +39,7 @@ void set_key_index(char *filename, long int index);
 
 void update_fifo(float key_presentage)
 {
-	int fd;
+	/*int fd;
     char *key_status_fifo = "/tmp/tx-key-presentage";
     mkfifo(key_status_fifo, 0666);
     char presentage_string[10];
@@ -46,12 +47,12 @@ void update_fifo(float key_presentage)
     sprintf(presentage_string,"%.2f %%",key_presentage);
 	fd = open(key_status_fifo, O_WRONLY| O_NONBLOCK);
 	write(fd, presentage_string, strlen(presentage_string)+1);
-	close(fd);
+	close(fd);*/
 }
 
 void update_rx_fifo(float key_presentage)
 {
-	int fd;
+	/*int fd;
     char *key_status_fifo = "/tmp/rx-key-presentage";
     mkfifo(key_status_fifo, 0666);
     char presentage_string[10];
@@ -59,7 +60,7 @@ void update_rx_fifo(float key_presentage)
     sprintf(presentage_string,"%.2f %%",key_presentage);
 	fd = open(key_status_fifo, O_WRONLY| O_NONBLOCK);
 	write(fd, presentage_string, strlen(presentage_string)+1);
-	close(fd);
+	close(fd);*/
 }
 
 int socket_create(unsigned short port)
@@ -241,13 +242,48 @@ int decryptpacket(char *buf,char *rxbuffer,int readbytes,char* keyfile, char* in
 	return buflen;
 }
 
-unsigned int socket_get_packet(int fd, struct sockaddr_in *sa, socklen_t *salen, char *buf, unsigned int bufsize, char* keyfile, char* inbound_counter_file)
+unsigned int socket_get_packet(int fd,
+                               struct sockaddr_in *sa,
+                               socklen_t *salen,
+                               char *buf,
+                               unsigned int bufsize,
+                               char* keyfile,
+                               char* inbound_counter_file)
 {
-	unsigned int rxbytes; 
-	char *rxbuffer = malloc(bufsize);
-	memset(rxbuffer, 0, bufsize);
-	rxbytes = recvfrom(fd, rxbuffer, bufsize, 0, (struct sockaddr *)sa, salen);
-	int decryptedbytes = decryptpacket(buf,rxbuffer,rxbytes,keyfile,inbound_counter_file);
-	free (rxbuffer);
-	return decryptedbytes;
+    ssize_t rxbytes;
+    char *rxbuffer = malloc(bufsize);
+    if (!rxbuffer) {
+        log_error("[%d] malloc(%u) failed in socket_get_packet", getpid(), bufsize);
+        return 0;
+    }
+    memset(rxbuffer, 0, bufsize);
+
+	// we know the size
+    socklen_t addrlen = sizeof(*sa);        
+    if (salen) {
+		// optional, for caller
+        *salen = addrlen;                  
+    }
+
+    rxbytes = recvfrom(fd,
+                       rxbuffer,
+                       bufsize,
+                       0,
+                       (struct sockaddr *)sa,
+                       &addrlen);
+
+    if (rxbytes <= 0) {
+        if (rxbytes < 0) {
+            log_error("[%d] recvfrom failed: %s", getpid(), strerror(errno));
+        } else {
+            log_error("[%d] recvfrom returned 0", getpid());
+        }
+        free(rxbuffer);
+        return 0;
+    }
+
+    int decryptedbytes = decryptpacket(buf, rxbuffer, rxbytes, keyfile, inbound_counter_file);
+    free(rxbuffer);
+    return decryptedbytes;
 }
+

@@ -68,6 +68,7 @@ unsigned int tun_get_packet(int fd, char *buf, unsigned int bufsize)
 
 void tun_put_packet(int fd, char *buf, unsigned int buflen)
 {
+	log_debug("tun_put_packet() buflen: %d", getpid(),buflen );
 	if(write(fd, buf, buflen) == -1) {
 		log_error("tun_put_packet() buflen: %d", getpid(),buflen );
 		exit(1);

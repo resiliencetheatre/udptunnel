@@ -32,3 +32,21 @@ ini.o: ini.c
 	$(CC) $(CFLAGS) $(INCLUDE) -c $?
 clean:
 	rm -f *.o client server
+
+# -----------------------------------------------------------
+# Install and uninstall
+# -----------------------------------------------------------
+
+PREFIX ?= /usr/local
+BINDIR = $(PREFIX)/bin
+
+install: $(REC_TARGET) $(SPOOL_TARGET)
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 0755 server  $(DESTDIR)$(BINDIR)/
+	install -m 0755 client $(DESTDIR)$(BINDIR)/
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/server
+	rm -f $(DESTDIR)$(BINDIR)/client
+
+.PHONY: all clean install uninstall

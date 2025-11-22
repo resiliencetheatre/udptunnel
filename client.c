@@ -148,15 +148,42 @@ int main(int argc, char *argv[])
 		if(ret == -1)
 			break;
 		if(FD_ISSET(tun_fd, &rfds)) {
+			log_debug("[%d] OUTBOUND ",getpid());
 			buflen = tun_get_packet(tun_fd, tp->data, sizeof(buf)-sizeof(struct tunnel_packet));
 			tp->type = TRAFFIC_PACKET;
 			tp->cmd = 0;
 			socket_put_packet(server_fd, &server_addr, sizeof(server_addr), buf, buflen + sizeof(struct tunnel_packet),outbound_key,outbound_counter);
 		}
 		if(FD_ISSET(server_fd, &rfds)) {
+			log_debug("[%d] INBOUND ",getpid());
+			fromlen = sizeof(from);
 			buflen = socket_get_packet(server_fd, &from, &fromlen, buf, sizeof(buf),inbound_key,inbound_counter);
+			
+			// DEBUG START
+			/*
+			char server_ip[INET_ADDRSTRLEN];
+			char from_ip[INET_ADDRSTRLEN];
+
+			inet_ntop(AF_INET, &server_addr.sin_addr, server_ip, sizeof(server_ip));
+			inet_ntop(AF_INET, &from.sin_addr, from_ip, sizeof(from_ip));
+
+			log_debug("[%d] Comparing RX packet source:", getpid());
+			log_debug("[%d]   server_addr.sin_addr = %s", getpid(), server_ip);
+			log_debug("[%d]   from.sin_addr        = %s", getpid(), from_ip);
+
+			log_debug("[%d]   server_addr.sin_port = %u", getpid(), ntohs(server_addr.sin_port));
+			log_debug("[%d]   from.sin_port        = %u", getpid(), ntohs(from.sin_port));
+			*/
+			// DEBUG END
+			
 			if(server_addr.sin_addr.s_addr == from.sin_addr.s_addr && server_addr.sin_port == from.sin_port)
+			{
+				log_debug("[%d] INBOUND -> tun_put_packet() ",getpid());
 				tun_put_packet(tun_fd, tp->data, buflen-sizeof(struct tunnel_packet));
+			} else {
+				log_debug("[%d] INBOUND -> tun_put_packet() FAILED ",getpid());
+			}
+			
 		}
 	}
 	return 1;
