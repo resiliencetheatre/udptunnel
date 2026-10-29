@@ -41,6 +41,25 @@ packets. This protocol does not hide packet length or key offset.
 
 ## Usage
 
+For a two-host Linux test, run `make test-bundles` (requires Python 3 and GNU
+`dd`). This creates `client-test/` and `server-test/`, each with its
+INI configuration, zeroed binary counters, and corresponding Linux script under
+`scripts/`. Two independent 10 MB (10,000,000-byte) keys are read from
+`/dev/urandom`; each client's outbound/inbound key is copied as the server's
+inbound/outbound key, respectively. **These generated bundles are for testing
+only and should not be used in real life.**
+
+Replace `[SERVER_IP]` in `client-test/client.ini` with the server's IP address.
+Copy each complete directory to its respective host, preserving executable
+permissions. The hosts must have binaries installed in `PATH` and use the same
+native C `long` format as the machine generating the counters. Allow UDP port
+9000 to the server, then run `sudo server -i server.ini` from `server-test/`
+and `sudo client -i client.ini` from `client-test/`.
+
+The target deletes and recreates both test directories on every run, replacing
+all contents with fresh keys, counters, configs, and scripts. Stop both endpoints
+before regenerating, then copy the fresh pair to their respective hosts.
+
 Edit `server.ini` and `client.ini` with the file paths, server address, and UDP port.
 Run from this directory so the configuration scripts can be found:
 

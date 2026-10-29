@@ -5,3 +5,6 @@ server
 
 tests/test_transport
 tests/test_transport_sanitize
+
+/client-test/
+/server-test/
