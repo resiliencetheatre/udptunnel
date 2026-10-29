@@ -47,12 +47,12 @@ int main(int argc, char *argv[])
 	char *ini_file=NULL;
 	char *server_address=NULL;
 	char *server_port=NULL;
-	char *auth=NULL;
+
 	char *outbound_key = NULL;
 	char *inbound_key = NULL;
 	char *outbound_counter = NULL;
 	char *inbound_counter = NULL;
-	
+
 	int log_level=LOG_INFO;
 	int c=0;
 	tp = (struct tunnel_packet *)buf;
@@ -76,53 +76,40 @@ int main(int argc, char *argv[])
 			default:
 			break;
 	}
-	if (ini_file == NULL) 
+	if (ini_file == NULL)
 	{
 		log_error("[%d] ini file not specified, exiting.", getpid());
-		return 0;
+		return 1;
 	}
-	
+
 	log_set_level(log_level);
 	ini_t *config = ini_load(ini_file);
 	if (config == NULL ) {
 		log_error("[%d] Cannot open ini-file, exiting.", getpid());
-		return 0;
+		return 1;
 	}
 	ini_sget(config, "client", "server_address", NULL, &server_address);
 	ini_sget(config, "client", "server_port", NULL, &server_port);
-	ini_sget(config, "client", "auth", NULL, &auth);
+
 	ini_sget(config, "client", "outbound_key", NULL, &outbound_key);
 	ini_sget(config, "client", "inbound_key", NULL, &inbound_key);
 	ini_sget(config, "client", "outbound_counter_file", NULL, &outbound_counter);
 	ini_sget(config, "client", "inbound_counter_file", NULL, &inbound_counter);
-	log_info("[%d] Server address: %s ",getpid(),server_address);
-	log_info("[%d] Server port %s",getpid(),server_port);
-	log_info("[%d] Auth: %s",getpid(),auth);
+	log_info("[%d] Server address: %s ",getpid(),server_address ? server_address : "(missing)");
+	log_info("[%d] Server port %s",getpid(),server_port ? server_port : "(missing)");
 
-	if( access( outbound_key, W_OK ) == 0 ) {
-		log_info("[%d] Outbound key file: %s",getpid(),outbound_key);
-	} else {
-		log_error("[%d] Cannot open outbound key file: %s. Need a writable file.",getpid(),outbound_key);
-	}
-	if( access( inbound_key, W_OK ) == 0 ) {
-		log_info("[%d] Inbound key file: %s",getpid(),inbound_key);
-	} else {
-		log_error("[%d] Cannot open inbound key file: %s. Need a writable file.",getpid(),inbound_key);
-	}
-	if( access( outbound_counter, W_OK ) == 0 ) {
-		log_info("[%d] Outbound key counter file: %s",getpid(),outbound_counter);
-	} else {
-		log_error("[%d] Cannot open outbound key counter file: %s. Need a writable file.",getpid(),outbound_counter);
-	}
-	if( access( inbound_counter, W_OK ) == 0 ) {
-		log_info("[%d] Inbound key counter file: %s",getpid(),inbound_counter);
-	} else {
-		log_error("[%d] Cannot open inbound key counter file: %s. Need a writable file.",getpid(),inbound_counter);
-	}
-	
+
+	if (!server_port || !server_address ||
+        !transport_config_valid(outbound_key, outbound_counter) ||
+        !transport_config_valid(inbound_key, inbound_counter) ||
+        !transport_files_distinct(outbound_key, inbound_key, outbound_counter, inbound_counter)) {
+        log_error("Invalid configuration: supply distinct directional keys and valid binary counters");
+        return 1;
+    }
+
 	struct hostent* host_info = gethostbyname(server_address);
 	if (host_info == NULL) {
-		log_error("[%d] Invalid hostname or IPv4 address: %s",getpid(),server_address);
+		log_error("[%d] Invalid hostname or IPv4 address: %s",getpid(),server_address ? server_address : "(missing)");
 		return 1;
 	}
 	log_info("[%d] Client starting",getpid());
@@ -130,17 +117,17 @@ int main(int argc, char *argv[])
 	memset(&from, 0, sizeof(from));
 	memcpy(&server_addr.sin_addr, host_info->h_addr, host_info->h_length);
 	if(strtoport(server_port, &server_addr.sin_port) == 0) {
-		log_error("[%d] Invalid port: %s",getpid(),server_port);
+		log_error("[%d] Invalid port: %s",getpid(),server_port ? server_port : "(missing)");
 		return 1;
 	}
 	server_addr.sin_family = AF_INET;
 	tun_fd = tun_create();
-	server_fd = socket_create(0);	
-	log_info("[%d] Auth bytes disabled",getpid());
+	server_fd = socket_create(0);
+
 	exec_script("linux_client.sh", server_address);
 	log_info("[%d] Tunnel is running",getpid());
 	FD_ZERO(&rfds);
-	
+
 	while(1) {
 		FD_SET(server_fd, &rfds);
 		FD_SET(tun_fd, &rfds);
@@ -149,7 +136,9 @@ int main(int argc, char *argv[])
 			break;
 		if(FD_ISSET(tun_fd, &rfds)) {
 			log_debug("[%d] OUTBOUND ",getpid());
-			buflen = tun_get_packet(tun_fd, tp->data, sizeof(buf)-sizeof(struct tunnel_packet));
+			int n = tun_get_packet(tun_fd, tp->data, sizeof(buf)-sizeof(struct tunnel_packet));
+            if (n <= 0) continue;
+            buflen = (unsigned int)n;
 			tp->type = TRAFFIC_PACKET;
 			tp->cmd = 0;
 			socket_put_packet(server_fd, &server_addr, sizeof(server_addr), buf, buflen + sizeof(struct tunnel_packet),outbound_key,outbound_counter);
@@ -157,25 +146,10 @@ int main(int argc, char *argv[])
 		if(FD_ISSET(server_fd, &rfds)) {
 			log_debug("[%d] INBOUND ",getpid());
 			fromlen = sizeof(from);
-			buflen = socket_get_packet(server_fd, &from, &fromlen, buf, sizeof(buf),inbound_key,inbound_counter);
-			
-			// DEBUG START
-			/*
-			char server_ip[INET_ADDRSTRLEN];
-			char from_ip[INET_ADDRSTRLEN];
+			buflen = socket_get_packet(server_fd, &from, &fromlen, buf, sizeof(buf),inbound_key,inbound_counter,&server_addr);
+            if (buflen < sizeof(struct tunnel_packet)) continue;
 
-			inet_ntop(AF_INET, &server_addr.sin_addr, server_ip, sizeof(server_ip));
-			inet_ntop(AF_INET, &from.sin_addr, from_ip, sizeof(from_ip));
 
-			log_debug("[%d] Comparing RX packet source:", getpid());
-			log_debug("[%d]   server_addr.sin_addr = %s", getpid(), server_ip);
-			log_debug("[%d]   from.sin_addr        = %s", getpid(), from_ip);
-
-			log_debug("[%d]   server_addr.sin_port = %u", getpid(), ntohs(server_addr.sin_port));
-			log_debug("[%d]   from.sin_port        = %u", getpid(), ntohs(from.sin_port));
-			*/
-			// DEBUG END
-			
 			if(server_addr.sin_addr.s_addr == from.sin_addr.s_addr && server_addr.sin_port == from.sin_port)
 			{
 				log_debug("[%d] INBOUND -> tun_put_packet() ",getpid());
@@ -183,7 +157,7 @@ int main(int argc, char *argv[])
 			} else {
 				log_debug("[%d] INBOUND -> tun_put_packet() FAILED ",getpid());
 			}
-			
+
 		}
 	}
 	return 1;

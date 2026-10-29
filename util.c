@@ -23,15 +23,19 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <string.h>
+#include <errno.h>
 #include "log.h"
 
 int strtoport(char *str, unsigned short *out)
 {
-	char *err;
-
-	*out = htons((unsigned short)strtoul(str, &err, 10));
-
-	return *err == 0;
+    char *err;
+    if (!str || !*str) return 0;
+    for (const char *p = str; *p; ++p) if (*p < '0' || *p > '9') return 0;
+    errno = 0;
+    unsigned long port = strtoul(str, &err, 10);
+    if (errno || *err || port == 0 || port > 65535) return 0;
+    *out = htons((unsigned short)port);
+    return 1;
 }
 
 void exec_script(const char *name, const char *arg)

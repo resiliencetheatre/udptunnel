@@ -45,19 +45,19 @@ int main(int argc, char *argv[])
 	int tun_fd;
 	int client_fd;
 	int has_client = 0;
-	unsigned int pass_len;
+
 	int log_level=LOG_INFO;
 	int c=0;
 	char *ini_file=NULL;
 	char *server_port=NULL;
-	char *auth=NULL;
+
 	char *outbound_key = NULL;
 	char *inbound_key = NULL;
 	char *outbound_counter = NULL;
 	char *inbound_counter = NULL;
-	
+
 	tp = (struct tunnel_packet *)buf;
-	
+
 	/* ini-file */
 	while ((c = getopt (argc, argv, "dhi:")) != -1)
 	switch (c)
@@ -77,61 +77,48 @@ int main(int argc, char *argv[])
 			default:
 			break;
 	}
-	if (ini_file == NULL) 
+	if (ini_file == NULL)
 	{
 		log_error("[%d] ini file not specified, exiting. ", getpid());
-		return 0;
+		return 1;
 	}
 
 	log_set_level(log_level);
-	
+
 	ini_t *config = ini_load(ini_file);
 	if (config == NULL ) {
 		log_error("[%d] Cannot open ini-file, exiting.", getpid());
-		return 0;
+		return 1;
 	}
 	ini_sget(config, "server", "server_port", NULL, &server_port);
-	ini_sget(config, "server", "auth", NULL, &auth);
+
 	ini_sget(config, "server", "outbound_key", NULL, &outbound_key);
 	ini_sget(config, "server", "inbound_key", NULL, &inbound_key);
 	ini_sget(config, "server", "outbound_counter_file", NULL, &outbound_counter);
 	ini_sget(config, "server", "inbound_counter_file", NULL, &inbound_counter);
-	log_info("[%d] Server port %s",getpid(),server_port);
-	log_info("[%d] Auth: %s",getpid(),auth);
+	log_info("[%d] Server port %s",getpid(),server_port ? server_port : "(missing)");
 
-	if( access( outbound_key, W_OK ) == 0 ) {
-		log_info("[%d] Outbound key file: %s",getpid(),outbound_key);
-	} else {
-		log_error("[%d] Cannot open outbound key file: %s. Need a writable file.",getpid(),outbound_key);
-	}
-	if( access( inbound_key, W_OK ) == 0 ) {
-		log_info("[%d] Inbound key file: %s",getpid(),inbound_key);
-	} else {
-		log_error("[%d] Cannot open inbound key file: %s. Need a writable file.",getpid(),inbound_key);
-	}
-	if( access( outbound_counter, W_OK ) == 0 ) {
-		log_info("[%d] Outbound key counter file: %s",getpid(),outbound_counter);
-	} else {
-		log_error("[%d] Cannot open outbound key counter file: %s. Need a writable file.",getpid(),outbound_counter);
-	}
-	if( access( inbound_counter, W_OK ) == 0 ) {
-		log_info("[%d] Inbound key counter file: %s",getpid(),inbound_counter);
-	} else {
-		log_error("[%d] Cannot open inbound key counter file: %s. Need a writable file.",getpid(),inbound_counter);
-	}
-	
+
+	if (!server_port ||
+        !transport_config_valid(outbound_key, outbound_counter) ||
+        !transport_config_valid(inbound_key, inbound_counter) ||
+        !transport_files_distinct(outbound_key, inbound_key, outbound_counter, inbound_counter)) {
+        log_error("Invalid configuration: supply distinct directional keys and valid binary counters");
+        return 1;
+    }
+
 	if(strtoport(server_port, &local_port) == 0) {
-		log_error("[%d] Invalid port: %s",getpid(),server_port);
+		log_error("[%d] Invalid port: %s",getpid(),server_port ? server_port : "(missing)");
 		return 1;
 	}
-	
-	pass_len = strlen(auth);
+
+
 	tun_fd = tun_create();
 	client_fd = socket_create(local_port);
 	fromlen = sizeof(from);
-	exec_script("linux_server.sh", server_port);	
+	exec_script("linux_server.sh", server_port);
 	FD_ZERO(&rfds);
-	
+
 	log_info("[%d] Server ready ",getpid());
 	while(1) {
 		FD_SET(client_fd, &rfds);
@@ -142,7 +129,9 @@ int main(int argc, char *argv[])
 			break;
 
 		if(FD_ISSET(tun_fd, &rfds)) {
-			buflen = tun_get_packet(tun_fd, tp->data, sizeof(buf)-sizeof(struct tunnel_packet));
+			int n = tun_get_packet(tun_fd, tp->data, sizeof(buf)-sizeof(struct tunnel_packet));
+            if (n <= 0) continue;
+            buflen = (unsigned int)n;
 			tp->type = TRAFFIC_PACKET;
 			tp->cmd = 0;
 			if(has_client) {
@@ -150,22 +139,13 @@ int main(int argc, char *argv[])
 			}
 		}
 		if(FD_ISSET(client_fd, &rfds)) {
-			buflen = socket_get_packet(client_fd, &from, &fromlen, buf, sizeof(buf),inbound_key,inbound_counter);
-			if(tp->type == TRAFFIC_PACKET) {
-				client_addr = from; 
-				has_client = 1; 	
-				if(client_addr.sin_addr.s_addr == from.sin_addr.s_addr && client_addr.sin_port == from.sin_port) {
-					tun_put_packet(tun_fd, tp->data, buflen-sizeof(struct tunnel_packet));
-				}
-			} else if(tp->type == CONTROL_PACKET && tp->cmd == AUTH_CMD) {
-				if(buflen-sizeof(struct tunnel_packet) == pass_len && strncmp(tp->data, auth, pass_len) == 0) {
-					client_addr = from;
-					tp->cmd = OK_CMD;
-					has_client = 1;
-				} else
-					tp->cmd = ERROR_CMD;
-				socket_put_packet(client_fd, &from, sizeof(from), buf,  sizeof(struct tunnel_packet),outbound_key,outbound_counter);
-			}
+			buflen = socket_get_packet(client_fd, &from, &fromlen, buf, sizeof(buf),inbound_key,inbound_counter,has_client ? &client_addr : NULL);
+            if (buflen < sizeof(struct tunnel_packet)) continue;
+            if (!has_client) {
+                client_addr = from;
+                has_client = 1;
+            }
+            tun_put_packet(tun_fd, tp->data, buflen-sizeof(struct tunnel_packet));
 		}
 	}
 	return 1;

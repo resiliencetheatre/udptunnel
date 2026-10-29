@@ -2,3 +2,6 @@
 *.o
 client
 server
+
+tests/test_transport
+tests/test_transport_sanitize

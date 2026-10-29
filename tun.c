@@ -61,16 +61,16 @@ int tun_create()
 	return fd;
 }
 
-unsigned int tun_get_packet(int fd, char *buf, unsigned int bufsize)
+int tun_get_packet(int fd, char *buf, unsigned int bufsize)
 {
 	return read(fd, buf, bufsize);
 }
 
 void tun_put_packet(int fd, char *buf, unsigned int buflen)
 {
-	log_debug("tun_put_packet() buflen: %d", getpid(),buflen );
+	log_debug("tun_put_packet() buflen: %u", buflen);
 	if(write(fd, buf, buflen) == -1) {
-		log_error("tun_put_packet() buflen: %d", getpid(),buflen );
+		log_error("tun_put_packet() buflen: %u", buflen);
 		exit(1);
 	}
 }

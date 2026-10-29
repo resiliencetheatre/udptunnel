@@ -1,289 +1,223 @@
-/*
- * udptunnel
- * Copyright © 2013 Felipe Astroza A.
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
- * 
- */
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
+/* UDP tunnel packet transport. Protocol v2 is intentionally incompatible with v1. */
+#include <utun/socket.h>
+#include <utun/tunnel_packet.h>
+#include <openssl/hmac.h>
+#include <openssl/crypto.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <unistd.h>
+#include <stdint.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
 #include <errno.h>
 #include "log.h"
-#include "binn.h"
 
-void safe_fclose(FILE *fp);
-long int get_key_index(char *filename);
-void set_key_index(char *filename, long int index);
+#define HEADER 14
+#define TAG 32
+#define WIRE_MAX (HEADER + MTU + TAG)
 
-void update_fifo(float key_presentage)
+static int read_counter(const char *path, long *value)
 {
-	/*int fd;
-    char *key_status_fifo = "/tmp/tx-key-presentage";
-    mkfifo(key_status_fifo, 0666);
-    char presentage_string[10];
-    memset(presentage_string,0,10);
-    sprintf(presentage_string,"%.2f %%",key_presentage);
-	fd = open(key_status_fifo, O_WRONLY| O_NONBLOCK);
-	write(fd, presentage_string, strlen(presentage_string)+1);
-	close(fd);*/
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    int ok = fread(value, sizeof(*value), 1, f) == 1 &&
+             fgetc(f) == EOF && !ferror(f) && *value >= 0;
+    fclose(f);
+    return ok;
 }
 
-void update_rx_fifo(float key_presentage)
+/* Rename prevents a crash from leaving a partially written counter. */
+static int write_counter(const char *path, long value)
 {
-	/*int fd;
-    char *key_status_fifo = "/tmp/rx-key-presentage";
-    mkfifo(key_status_fifo, 0666);
-    char presentage_string[10];
-    memset(presentage_string,0,10);
-    sprintf(presentage_string,"%.2f %%",key_presentage);
-	fd = open(key_status_fifo, O_WRONLY| O_NONBLOCK);
-	write(fd, presentage_string, strlen(presentage_string)+1);
-	close(fd);*/
+    size_t n = strlen(path) + 12;
+    char *tmp = malloc(n);
+    if (!tmp) return 0;
+    snprintf(tmp, n, "%s.XXXXXX", path);
+    int fd = mkstemp(tmp);
+    int ok = fd >= 0;
+    if (ok) {
+        ok = write(fd, &value, sizeof(value)) == sizeof(value) && fsync(fd) == 0;
+        if (close(fd) != 0) ok = 0;
+    }
+    if (ok) ok = rename(tmp, path) == 0;
+    if (ok) {
+        char *slash = strrchr(tmp, '/');
+        if (slash == tmp) slash[1] = '\0';
+        else if (slash) *slash = '\0';
+        int dir = open(slash ? tmp : ".", O_RDONLY | O_DIRECTORY);
+        ok = dir >= 0 && fsync(dir) == 0;
+        if (dir >= 0) close(dir);
+        /* A failed directory sync leaves the reservation in place. */
+        free(tmp);
+        return ok;
+    }
+    if (!ok) unlink(tmp);
+    free(tmp);
+    return ok;
+}
+
+int transport_config_valid(const char *key, const char *counter)
+{
+    struct stat st;
+    long index;
+    int fd;
+    if (!key || !counter || !strcmp(key, counter)) return 0;
+    fd = open(key, O_RDWR);
+    if (fd < 0) return 0;
+    int ok = fstat(fd, &st) == 0 && S_ISREG(st.st_mode) &&
+             read_counter(counter, &index) && index <= st.st_size &&
+             st.st_size - index >= TAG + 2;
+    close(fd);
+    return ok;
+}
+
+int transport_files_distinct(const char *a, const char *b, const char *c, const char *d)
+{
+    const char *paths[] = {a, b, c, d};
+    struct stat st[4];
+    for (int i = 0; i < 4; ++i) {
+        if (!paths[i] || stat(paths[i], &st[i]) || !S_ISREG(st[i].st_mode)) return 0;
+        for (int j = 0; j < i; ++j)
+            if (st[i].st_dev == st[j].st_dev && st[i].st_ino == st[j].st_ino) return 0;
+    }
+    return 1;
+}
+
+static int open_key(const char *path)
+{
+    int fd = open(path, O_RDWR);
+    if (fd >= 0 && flock(fd, LOCK_EX) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+static int read_key(int fd, long offset, unsigned char *key, size_t size)
+{
+    struct stat st;
+    if (offset < 0 || size > LONG_MAX - offset || fstat(fd, &st) != 0 ||
+        !S_ISREG(st.st_mode) || offset > st.st_size || size > (size_t)(st.st_size-offset)) return 0;
+    size_t done = 0;
+    while (done < size) {
+        ssize_t n = pread(fd, key + done, size - done, offset + done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return 0;
+        done += n;
+    }
+    return 1;
+}
+
+static int commit_key(int fd, const char *counter, long offset, size_t size)
+{
+    /* Reserve first: an erasure failure must never permit key reuse. */
+    if (!write_counter(counter, offset + size)) return 0;
+    unsigned char zeros[MTU + TAG] = {0};
+    size_t done = 0;
+    while (done < size) {
+        ssize_t n = pwrite(fd, zeros + done, size - done, offset + done);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) return 0;
+        done += n;
+    }
+    return fsync(fd) == 0;
+}
+
+static int mac(const unsigned char *key, const unsigned char *data, size_t n, unsigned char *tag)
+{
+    unsigned int len = 0;
+    return HMAC(EVP_sha256(), key, TAG, data, n, tag, &len) != NULL && len == TAG;
+}
+
+int encryptpacket(const char *buf, unsigned int len, unsigned char *wire,
+                  size_t capacity, const char *keyfile, const char *counter)
+{
+    unsigned char key[MTU + TAG];
+    long index;
+    int result = 0, fd = -1;
+    if (len < 2 || len > MTU || capacity < HEADER + len + TAG) return 0;
+    fd = open_key(keyfile);
+    if (fd < 0 || !read_counter(counter, &index) ||
+        !read_key(fd, index, key, len + TAG)) goto out;
+    memcpy(wire, "UTN2", 4);
+    uint64_t pos = index;
+    for (int i = 11; i >= 4; --i) { wire[i] = pos & 255; pos >>= 8; }
+    wire[12] = len >> 8; wire[13] = len & 255;
+    for (unsigned int i = 0; i < len; ++i) wire[HEADER+i] = (unsigned char)buf[i] ^ key[i];
+    if (!mac(key + len, wire, HEADER + len, wire + HEADER + len) ||
+        !commit_key(fd, counter, index, len + TAG)) goto out;
+    result = HEADER + len + TAG;
+out:
+    OPENSSL_cleanse(key, sizeof(key));
+    if (fd >= 0) close(fd);
+    return result;
+}
+
+int decryptpacket(char *buf, size_t capacity, const unsigned char *wire,
+                  size_t bytes, const char *keyfile, const char *counter)
+{
+    unsigned char key[MTU + TAG], tag[TAG], plain[MTU];
+    int fd = -1, result = 0;
+    long next;
+    if (bytes < HEADER + 2 + TAG || memcmp(wire, "UTN2", 4)) return 0;
+    unsigned int len = ((unsigned int)wire[12] << 8) | wire[13];
+    if (len < 2 || len > MTU || len > capacity || bytes != HEADER + len + TAG) return 0;
+    uint64_t index = 0;
+    for (int i = 4; i < 12; ++i) index = (index << 8) | wire[i];
+    if (index > LONG_MAX) return 0;
+    fd = open_key(keyfile);
+    if (fd < 0 || !read_counter(counter, &next) || index < (uint64_t)next ||
+        !read_key(fd, (long)index, key, len + TAG)) goto out;
+    if (!mac(key + len, wire, HEADER + len, tag) ||
+        CRYPTO_memcmp(tag, wire + HEADER + len, TAG)) goto out;
+    for (unsigned int i = 0; i < len; ++i) plain[i] = wire[HEADER+i] ^ key[i];
+    if (plain[0] != TRAFFIC_PACKET || plain[1] != 0) goto out;
+    if (!commit_key(fd, counter, index, len + TAG)) goto out;
+    memcpy(buf, plain, len);
+    result = len;
+out:
+    OPENSSL_cleanse(key, sizeof(key));
+    OPENSSL_cleanse(plain, sizeof(plain));
+    if (fd >= 0) close(fd);
+    return result;
 }
 
 int socket_create(unsigned short port)
 {
-	struct sockaddr_in sa;
-
-	int fd = socket(AF_INET, SOCK_DGRAM, 0);
-
-	if(fd == -1) {
-		perror("socket");
-		exit(1);
-	}
-
-	sa.sin_addr.s_addr = htonl(INADDR_ANY);
-	sa.sin_port = port;
-	sa.sin_family = AF_INET;
-
-	if(bind(fd, (struct sockaddr *)&sa, sizeof(sa)) == -1) {
-		perror("bind");
-		exit(1);
-	}
-
-	return fd;
-}
-
-void safe_fclose(FILE *fp)
-{
-	if (fp && fp != stdout && fp != stderr) {
-		if (fclose(fp) == EOF) {
-			perror("fclose()");
-		}
-		fp = NULL;
-	}
-}
-
-long int get_file_size (char *filename) {
-	struct stat st;
-	long int size=0;
-	stat(filename, &st);
-	size = st.st_size;
-	return size;
-}
-
-long int get_key_index(char *filename) {
-	long int index=0;
-	FILE *keyindex_file;
-	keyindex_file = fopen(filename, "rb");
-	fread(&index, sizeof(long int),1,keyindex_file);
-	safe_fclose(keyindex_file);
-	return index;
-}
-
-void set_key_index(char *filename, long int index) {
-	FILE *keyindex_file;
-	keyindex_file = fopen(filename, "wb");
-	fwrite(&index, sizeof(long int), 1, keyindex_file);
-	safe_fclose(keyindex_file);
-}
-
-void getkey(char *filename, char* keybuf, long int start_index, int len, bool overwrite)
-{	
-	FILE *keyfile;
-	size_t freadlen=0;
-	keyfile = fopen(filename, "rb");
-	if (fseek(keyfile, start_index, SEEK_SET)) {
-			printf("Seek error!\n");
-	}
-	freadlen = fread(keybuf, sizeof(char),len,keyfile);
-	if ( freadlen == 0 ) {
-		log_error("[%d] %s fread return: %d ", getpid(),filename,freadlen);	
-		log_error("[%d] You run out of key material! Exiting. ", getpid());	
-		exit(0);
-	}
-	safe_fclose(keyfile);
-	if ( overwrite == TRUE )
-	{
-		log_debug("[%d] Key %s overwrite at: %ld len: %d", getpid(),filename,start_index,len);
-		char *zerobuf = malloc(len);
-		memset(zerobuf,0xFF,len);
-		int f_read = open(filename, O_WRONLY);
-		lseek (f_read, start_index, SEEK_CUR);
-		write(f_read, zerobuf, len);
-		close(f_read);
-		free(zerobuf);
-		log_debug("[%d] Key overwrite complete and buffers free'd", getpid() );
-	}
-}
-
-void print_hex_memory(void *mem, int buflen) {
-  int i;
-  unsigned char *p = (unsigned char *)mem;
-  for (i=0;i<buflen;i++) {
-    printf("0x%02x ", p[i]);
-    if ((i%16==0) && i)
-      printf("\n");
-  }
-  printf("\n");
-}
-
-int encryptpacket(char *buf, unsigned int buflen, char *serializedbuf, char *keyfile,char* outbound_counter_file)
-{	
-	static long int tx_key_ref;
-	int packet_size;
-	unsigned char *xorbytes = malloc(buflen);
-	memset(xorbytes, 0, buflen);
-	char *key = malloc(buflen);
-	memset(key, 0, buflen);
-	long int tx_key_used = get_key_index(outbound_counter_file);
-	
-		getkey(keyfile,key,tx_key_used-buflen,buflen,TRUE);
-		for(int i = 0; i < buflen; ++i)
-		{
-			xorbytes[i] = buf[i] ^ key[i];
-		}
-
-	tx_key_used = tx_key_used + buflen;
-	set_key_index(outbound_counter_file, tx_key_used);
-		
-		binn *obj;
-		obj = binn_object();
-		binn_object_set_blob(obj, "packet", xorbytes,buflen);
-		binn_object_set_int64(obj, "keyindex", tx_key_used-buflen);
-		binn_object_set_int32(obj, "buflen", buflen);	
-		memcpy(serializedbuf,binn_ptr(obj), binn_size(obj));
-		packet_size = binn_size(obj);
-		binn_free(obj);
-		free(xorbytes);
-		
-		if (tx_key_used > tx_key_ref ) {
-			long int key_file_size = get_file_size(keyfile);
-			float key_presentage = (100.0*tx_key_used)/key_file_size;
-			tx_key_ref = tx_key_used + 500;
-			log_info("[%d] TX key used: %ld (of %ld) %.2f %%",getpid(),tx_key_used,key_file_size,key_presentage );
-			update_fifo(key_presentage);
-		}
-	 return packet_size;
-}
-
-void socket_put_packet(int fd, struct sockaddr_in *sa, socklen_t salen, char *buf, unsigned int buflen, char *keyfile,char* outbound_counter_file)
-{
-	char serializedbuf[2000]; 
-	memset(serializedbuf, 0, 2000);
-	int serialized_packet_len = encryptpacket(buf,buflen,serializedbuf,keyfile, outbound_counter_file);
-	if( sendto( fd, serializedbuf, serialized_packet_len, 0, (struct sockaddr *)sa, salen ) == -1) {
-		perror("sendto");
-		exit(1);
-	}
-}
-
-int decryptpacket(char *buf,char *rxbuffer,int readbytes,char* keyfile, char* inbound_counter_file)
-{	
-	static long int rx_key_ref;
-	unsigned char *serializedbuf; 
-	long int keyindex;
-	int buflen;
-	char *key;
-	binn *obj;
-	obj = binn_open(rxbuffer);
-	keyindex = binn_object_int64(obj, "keyindex");
-	buflen = binn_object_int32(obj, "buflen");
-	serializedbuf = binn_object_blob(obj, "packet",&buflen);
-	binn_free(obj);
-	key = malloc(buflen);
-	memset(key, 0, buflen);
-	getkey(keyfile,key,keyindex-buflen,buflen,TRUE);	
-	for(int i = 0; i < buflen; ++i)
-	{
-		buf[i] = serializedbuf[i] ^ key[i];
-	}
-	set_key_index(inbound_counter_file, keyindex + buflen );
-	long int rx_key_used = keyindex + buflen;
-	if (rx_key_used > rx_key_ref ) {	
-		long int key_file_size = get_file_size(keyfile);
-		float key_presentage = (100.0*rx_key_used)/key_file_size;
-		rx_key_ref = rx_key_used + 500;
-		log_info("[%d] RX key used: %ld (of %ld) %.2f %%",getpid(),rx_key_used,key_file_size,key_presentage );
-		update_rx_fifo(key_presentage);
-	}
-	return buflen;
-}
-
-unsigned int socket_get_packet(int fd,
-                               struct sockaddr_in *sa,
-                               socklen_t *salen,
-                               char *buf,
-                               unsigned int bufsize,
-                               char* keyfile,
-                               char* inbound_counter_file)
-{
-    ssize_t rxbytes;
-    char *rxbuffer = malloc(bufsize);
-    if (!rxbuffer) {
-        log_error("[%d] malloc(%u) failed in socket_get_packet", getpid(), bufsize);
-        return 0;
+    struct sockaddr_in sa = {0};
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    sa.sin_family = AF_INET;
+    sa.sin_addr.s_addr = htonl(INADDR_ANY);
+    sa.sin_port = port;
+    if (fd < 0 || bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+        perror("UDP socket"); exit(1);
     }
-    memset(rxbuffer, 0, bufsize);
-
-	// we know the size
-    socklen_t addrlen = sizeof(*sa);        
-    if (salen) {
-		// optional, for caller
-        *salen = addrlen;                  
-    }
-
-    rxbytes = recvfrom(fd,
-                       rxbuffer,
-                       bufsize,
-                       0,
-                       (struct sockaddr *)sa,
-                       &addrlen);
-
-    if (rxbytes <= 0) {
-        if (rxbytes < 0) {
-            log_error("[%d] recvfrom failed: %s", getpid(), strerror(errno));
-        } else {
-            log_error("[%d] recvfrom returned 0", getpid());
-        }
-        free(rxbuffer);
-        return 0;
-    }
-
-    int decryptedbytes = decryptpacket(buf, rxbuffer, rxbytes, keyfile, inbound_counter_file);
-    free(rxbuffer);
-    return decryptedbytes;
+    return fd;
 }
 
+void socket_put_packet(int fd, struct sockaddr_in *sa, socklen_t salen,
+                       char *buf, unsigned int len, char *key, char *counter)
+{
+    unsigned char wire[WIRE_MAX];
+    int n = encryptpacket(buf, len, wire, sizeof(wire), key, counter);
+    if (!n) { log_error("Cannot encrypt packet: check key material and counter file"); return; }
+    if (sendto(fd, wire, n, 0, (struct sockaddr *)sa, salen) != n)
+        log_error("sendto: %s", strerror(errno));
+}
+
+unsigned int socket_get_packet(int fd, struct sockaddr_in *sa, socklen_t *salen,
+                               char *buf, unsigned int capacity, char *key, char *counter,
+                               const struct sockaddr_in *peer)
+{
+    /* One extra byte makes oversized datagrams unambiguously invalid. */
+    unsigned char wire[WIRE_MAX + 1];
+    socklen_t addrlen = sizeof(*sa);
+    ssize_t n = recvfrom(fd, wire, sizeof(wire), 0, (struct sockaddr *)sa, &addrlen);
+    if (salen) *salen = addrlen;
+    if (n <= 0 || n > WIRE_MAX) return 0;
+    if (peer && (peer->sin_addr.s_addr != sa->sin_addr.s_addr || peer->sin_port != sa->sin_port)) return 0;
+    return decryptpacket(buf, capacity, wire, n, key, counter);
+}
