@@ -18,6 +18,7 @@
  */
 
 #include <stdio.h>
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
@@ -40,22 +41,21 @@ static const char device_name[] = "/dev/net/tun";
 static const char device_name[] = "/dev/tun0";
 #endif
 
-int tun_create()
+int tun_create_named(const char *name)
 {
 	int fd;
 
 	if ((fd = open(device_name,O_RDWR)) == -1) {
-		perror("open");
-		exit(1);
+		return -1;
 	}
 #ifdef __linux__
 	struct ifreq ifr;
 	memset(&ifr, 0, sizeof(ifr));
 	ifr.ifr_flags = IFF_TUN|IFF_NO_PI;
-	strncpy(ifr.ifr_name, "tun0", IFNAMSIZ);
+	if (!name || !*name || strlen(name) >= IFNAMSIZ) { close(fd); errno=EINVAL; return -1; }
+	strncpy(ifr.ifr_name, name, IFNAMSIZ);
 	if(ioctl(fd, TUNSETIFF, (void *)&ifr) == -1) {
-		perror("perror");
-		exit(1);
+		int saved=errno; close(fd); errno=saved; return -1;
 	}
 #endif
 	return fd;
@@ -73,4 +73,11 @@ void tun_put_packet(int fd, char *buf, unsigned int buflen)
 		log_error("tun_put_packet() buflen: %u", buflen);
 		exit(1);
 	}
+}
+
+int tun_create(void)
+{
+    int fd=tun_create_named("tun0");
+    if (fd<0) { perror("create TUN"); exit(1); }
+    return fd;
 }

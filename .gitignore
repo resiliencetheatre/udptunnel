@@ -8,3 +8,11 @@ tests/test_transport_sanitize
 
 /client-test/
 /server-test/
+
+/node
+/mesh-test/
+/tests/test_mesh
+/tests/test_mesh_sanitize
+__pycache__/
+
+/utun-node

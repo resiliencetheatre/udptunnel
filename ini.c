@@ -36,7 +36,7 @@ struct ini_t {
 /* Case insensitive string compare */
 static int strcmpci(const char *a, const char *b) {
   for (;;) {
-    int d = tolower(*a) - tolower(*b);
+    int d = tolower((unsigned char)*a) - tolower((unsigned char)*b);
     if (d != 0 || !*a) {
       return d;
     }
@@ -55,7 +55,9 @@ static char* next(ini_t *ini, char *p) {
 
 static void trim_back(ini_t *ini, char *p) {
   while (p >= ini->data && (*p == ' ' || *p == '\t' || *p == '\r')) {
-    *p-- = '\0';
+    *p = '\0';
+    if (p == ini->data) break;
+    p--;
   }
 }
 
@@ -134,7 +136,7 @@ static void split_data(ini_t *ini) {
           p = discard_line(ini, line_start);
           break;
         }
-        trim_back(ini, p - 1);
+        if (p > ini->data) trim_back(ini, p - 1);
 
         /* Replace '=' and whitespace after it with '\0' */
         do {
@@ -164,7 +166,7 @@ static void split_data(ini_t *ini) {
         } else {
           /* Handle normal value */
           p += strcspn(p, "\n");
-          trim_back(ini, p - 1);
+          if (p > ini->data) trim_back(ini, p - 1);
         }
         break;
     }
@@ -176,7 +178,8 @@ static void split_data(ini_t *ini) {
 ini_t* ini_load(const char *filename) {
   ini_t *ini = NULL;
   FILE *fp = NULL;
-  int n, sz;
+  size_t n;
+  long sz;
 
   /* Init ini struct */
   ini = malloc(sizeof(*ini));
@@ -192,16 +195,16 @@ ini_t* ini_load(const char *filename) {
   }
 
   /* Get file size */
-  fseek(fp, 0, SEEK_END);
-  sz = ftell(fp);
-  rewind(fp);
+  if (fseek(fp, 0, SEEK_END) || (sz = ftell(fp)) < 0 ||
+      sz > 16 * 1024 * 1024 || fseek(fp, 0, SEEK_SET)) goto fail;
 
   /* Load file content into memory, null terminate, init end var */
-  ini->data = malloc(sz + 1);
+  ini->data = malloc((size_t)sz + 1);
+  if (!ini->data) goto fail;
   ini->data[sz] = '\0';
   ini->end = ini->data  + sz;
   n = fread(ini->data, 1, sz, fp);
-  if (n != sz) {
+  if (n != (size_t)sz) {
     goto fail;
   }
 

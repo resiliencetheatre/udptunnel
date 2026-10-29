@@ -6,7 +6,8 @@
 #ifndef TUN_H
 #define TUN_H
 
-int tun_create();
+int tun_create(void);
+int tun_create_named(const char *name);
 int tun_get_packet(int fd, char *buf, unsigned int bufsize);
 void tun_put_packet(int fd, char *buf, unsigned int buflen);
 

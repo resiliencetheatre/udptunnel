@@ -59,6 +59,15 @@ static int write_counter(const char *path, long value)
     return ok;
 }
 
+long long transport_key_remaining(const char *key, const char *counter)
+{
+    struct stat st;
+    long next;
+    if (!key || !counter || stat(key,&st) || !S_ISREG(st.st_mode) ||
+        !read_counter(counter,&next) || next>st.st_size) return -1;
+    return st.st_size-next;
+}
+
 int transport_config_valid(const char *key, const char *counter)
 {
     struct stat st;
@@ -99,7 +108,7 @@ static int open_key(const char *path)
 static int read_key(int fd, long offset, unsigned char *key, size_t size)
 {
     struct stat st;
-    if (offset < 0 || size > LONG_MAX - offset || fstat(fd, &st) != 0 ||
+    if (offset < 0 || size > (size_t)(LONG_MAX - offset) || fstat(fd, &st) != 0 ||
         !S_ISREG(st.st_mode) || offset > st.st_size || size > (size_t)(st.st_size-offset)) return 0;
     size_t done = 0;
     while (done < size) {

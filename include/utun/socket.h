@@ -10,6 +10,7 @@
 #include <netinet/in.h>
 
 int transport_files_distinct(const char *, const char *, const char *, const char *);
+long long transport_key_remaining(const char *, const char *);
 int transport_config_valid(const char *, const char *);
 int encryptpacket(const char *, unsigned int, unsigned char *, size_t, const char *, const char *);
 int decryptpacket(char *, size_t, const unsigned char *, size_t, const char *, const char *);

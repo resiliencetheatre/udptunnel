@@ -1,7 +1,11 @@
 # Future design: multi-peer encrypted overlay
 
-Status: design proposal, 2026-10-29. This document records the architecture and
-sizing discussion; none of the multi-peer features described here are implemented.
+Status: static IPv4 mesh implemented on the `future` branch, 2026-10-29.
+This document retains the architecture and sizing discussion. `utun-node` now
+implements a shared TUN, static peer selection, independent key state, and inner
+source/destination enforcement. Test bundles and WireGuard templates are generated
+by `make test-bundles PEERS=N`. See [the README](../README.md) for current usage.
+Discovery, roaming, rotation, and replay-window improvements remain future work.
 
 ## Objective
 
@@ -14,7 +18,7 @@ Throughout this document, **N means total endpoint hosts**, excluding a relay-on
 VPS. A network of 32 hosts gives each host 31 remote peers. A host with 32 remote
 peers belongs to a network of 33 hosts.
 
-## Current implementation
+## Original implementation (before the mesh extension)
 
 - `client.c` sends all TUN packets to one configured IPv4 endpoint.
 - `server.c` pins the first authenticated peer until restart.
@@ -246,7 +250,7 @@ add a sequence-number bitmap. Every packet currently performs synchronous file
 operations; a shared daemon could stall all peers on one slow storage operation.
 Measure this before deciding scheduling or concurrency details.
 
-## Proposed implementation stages
+## Implementation stages and validation
 
 1. Define a common node configuration with explicit interface/address settings
    and independent peer records. Preserve current key-consumption invariants.
@@ -261,5 +265,15 @@ Measure this before deciding scheduling or concurrency details.
    replay-window improvement explicitly before adding them. Discovery and dynamic
    routing are optional later features, not prerequisites for the static design.
 
-No deployment, network changes, or tunnel implementation are performed by this
-document. End-to-end integration and failure testing remain future work.
+Stages 1–3 are implemented for static IPv4 host routes using `utun-node`, with
+one shared TUN and one UDP socket. Stage 4 includes per-peer counters and remaining
+key-byte reporting on SIGUSR1/shutdown; throughput benchmarking remains open.
+Stage 5 remains future work. Kernel routing/setup is provided as explicit scripts,
+not automatically applied by the daemon.
+
+Validation includes three-host peer-isolation/authentication tests, 32-host bundle
+validation, AddressSanitizer/UndefinedBehaviorSanitizer tests, and a real 32-host
+TUN/WireGuard relay integration test in disposable namespaces. All 992 directed
+overlay pings and an MTU-sized packet passed; relay captures showed inner encrypted
+UDP packets. These tests do not constitute a cryptographic audit or production
+performance/crash-recovery validation. No external VPS was deployed.
