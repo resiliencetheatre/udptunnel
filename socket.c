@@ -1,4 +1,4 @@
-/* UDP tunnel packet transport. Protocol v2 is intentionally incompatible with v1. */
+/* UDP tunnel packet transport. The wire header has no protocol signature. */
 #include <utun/socket.h>
 #include <utun/tunnel_packet.h>
 #include <openssl/hmac.h>
@@ -15,7 +15,7 @@
 #include <errno.h>
 #include "log.h"
 
-#define HEADER 14
+#define HEADER 10
 #define TAG 32
 #define WIRE_MAX (HEADER + MTU + TAG)
 
@@ -142,10 +142,9 @@ int encryptpacket(const char *buf, unsigned int len, unsigned char *wire,
     fd = open_key(keyfile);
     if (fd < 0 || !read_counter(counter, &index) ||
         !read_key(fd, index, key, len + TAG)) goto out;
-    memcpy(wire, "UTN2", 4);
     uint64_t pos = index;
-    for (int i = 11; i >= 4; --i) { wire[i] = pos & 255; pos >>= 8; }
-    wire[12] = len >> 8; wire[13] = len & 255;
+    for (int i = 7; i >= 0; --i) { wire[i] = pos & 255; pos >>= 8; }
+    wire[8] = len >> 8; wire[9] = len & 255;
     for (unsigned int i = 0; i < len; ++i) wire[HEADER+i] = (unsigned char)buf[i] ^ key[i];
     if (!mac(key + len, wire, HEADER + len, wire + HEADER + len) ||
         !commit_key(fd, counter, index, len + TAG)) goto out;
@@ -162,11 +161,11 @@ int decryptpacket(char *buf, size_t capacity, const unsigned char *wire,
     unsigned char key[MTU + TAG], tag[TAG], plain[MTU];
     int fd = -1, result = 0;
     long next;
-    if (bytes < HEADER + 2 + TAG || memcmp(wire, "UTN2", 4)) return 0;
-    unsigned int len = ((unsigned int)wire[12] << 8) | wire[13];
+    if (bytes < HEADER + 2 + TAG) return 0;
+    unsigned int len = ((unsigned int)wire[8] << 8) | wire[9];
     if (len < 2 || len > MTU || len > capacity || bytes != HEADER + len + TAG) return 0;
     uint64_t index = 0;
-    for (int i = 4; i < 12; ++i) index = (index << 8) | wire[i];
+    for (int i = 0; i < 8; ++i) index = (index << 8) | wire[i];
     if (index > LONG_MAX) return 0;
     fd = open_key(keyfile);
     if (fd < 0 || !read_counter(counter, &next) || index < (uint64_t)next ||

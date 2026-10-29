@@ -36,7 +36,16 @@ int main(void)
     long used=0;
     for(size_t k=0;k<sizeof(lengths)/sizeof(*lengths);k++) {
         int len=lengths[k];
-        int n=encryptpacket(plain,len,wire,sizeof(wire),tx,tc); assert(n>len);
+        int n=encryptpacket(plain,len,wire,sizeof(wire),tx,tc);
+        assert(n==10+len+32);
+        /* The header starts directly with the offset, followed by length. */
+        unsigned long long encoded_offset=0;
+        for (int j=0;j<8;j++) encoded_offset=(encoded_offset<<8)|wire[j];
+        assert(encoded_offset==(unsigned long long)used);
+        assert((((unsigned int)wire[8]<<8)|wire[9])==(unsigned int)len);
+        /* A legacy signature-prefixed packet must not be accepted. */
+        memcpy(bad,"UTN2",4); memcpy(bad+4,wire,n);
+        assert(!decryptpacket(out,sizeof(out),bad,n+4,rx,rc));
         assert(counter(tc)==used+len+32);
         /* Every truncation and every single-byte tampering must be rejected. */
         for(int j=0;j<n;j++) assert(!decryptpacket(out,sizeof(out),wire,j,rx,rc));

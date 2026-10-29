@@ -6,14 +6,18 @@ Run `make test` and `make sanitize` for transport regression tests.
 
 ## Protocol upgrade
 
-Both endpoints must run this version. Protocol v2 rejects the old unauthenticated
-Binn format. The fixed header contains `UTN2`, an eight-byte big-endian key offset,
-and a two-byte payload length, followed by ciphertext and a 32-byte HMAC-SHA256.
+Both endpoints must run this version. The wire format is incompatible with both
+the old unauthenticated Binn format and the earlier `UTN2`-prefixed format.
+The fixed ten-byte header contains an eight-byte big-endian key offset and a
+two-byte big-endian payload length, followed by ciphertext and a 32-byte
+HMAC-SHA256. No cleartext protocol signature is transmitted.
 The MAC covers the header and ciphertext. Each packet consumes its payload length
 plus 32 separate key bytes for the MAC. Offsets start at zero and advance without
 overlap. The old `auth` configuration option is no longer used.
 
-Use **fresh random key material and new counters** when upgrading. Never reset a
+Use **fresh random key material and new counters** when upgrading from the old
+Binn implementation. When upgrading from the `UTN2`-prefixed format, stop both
+endpoints and update them together; preserve their existing keys and counters. Never reset a
 counter for an existing key or reuse keys between directions. Each endpoint needs
 four distinct regular files: `out.key`, `in.key`, `out.counter`, and `in.counter`.
 The client's outbound key must initially match the server's inbound key byte for

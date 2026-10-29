@@ -13,7 +13,7 @@ configuration defects. The corrections below are implemented in the working tree
 
 | Finding | Severity | Correction | Files |
 | --- | --- | --- | --- |
-| Incoming Binn packets were parsed without bounding reads by the received datagram length. A truncated packet caused a heap-buffer-overflow under AddressSanitizer. | High | Replaced the network-facing Binn format with a fixed, versioned format. Validate minimum size, magic, payload length, output capacity, and exact datagram size before processing payloads. Reject oversized datagrams. | `socket.c`, `include/utun/socket.h` |
+| Incoming Binn packets were parsed without bounding reads by the received datagram length. A truncated packet caused a heap-buffer-overflow under AddressSanitizer. | High | Replaced the network-facing Binn format with a fixed authenticated format. Validate minimum size, payload length, output capacity, and exact datagram size before processing payloads. Reject oversized datagrams. | `socket.c`, `include/utun/socket.h` |
 | Partial key reads left zero-filled bytes in the key buffer, exposing the corresponding plaintext through XOR. This was reproduced with an eight-byte payload and four-byte key. | High | Require sufficient key material and complete reads before producing a packet. Failures emit no packet and do not advance the counter. | `socket.c` |
 | Reading at `counter - packet_length` caused negative initial offsets and overlapping key ranges when packet sizes changed. | High | Treat the counter as the next unused byte offset. Consume payload-length bytes for XOR plus 32 separate bytes for authentication, then advance past that entire range. Validate offsets and arithmetic bounds. | `socket.c` |
 | Unverified packets could select and overwrite inbound key ranges, including through replay. | High | Authenticate the header and ciphertext with HMAC-SHA256 before modifying inbound state. Reject offsets behind the inbound counter. Reject invalid traffic headers before committing key consumption. | `socket.c` |
@@ -42,14 +42,13 @@ configuration defects. The corrections below are implemented in the working tree
 
 ## Protocol and operational changes
 
-Both endpoints must be upgraded together. Protocol v2 is incompatible with the
-old unauthenticated Binn wire format.
+Both endpoints must be upgraded together. The current format is incompatible with
+the old unauthenticated Binn format and the earlier `UTN2`-prefixed format.
 
 The wire layout is:
 
 | Field | Size |
 | --- | --- |
-| Magic `UTN2` | 4 bytes |
 | Key offset, unsigned big-endian | 8 bytes |
 | Payload length, unsigned big-endian | 2 bytes |
 | XOR ciphertext | Payload length |
@@ -57,8 +56,9 @@ The wire layout is:
 
 Each packet consumes its payload length plus 32 key bytes. Authentication uses
 separate key bytes from those used for the XOR payload. Provision fresh random
-keys and zero-valued counters when upgrading; never reset counters for previously
-used keys or reuse material between directions.
+keys and zero-valued counters when upgrading from Binn; never reset counters for
+previously used keys or reuse material between directions. For an upgrade from
+the `UTN2`-prefixed format alone, preserve existing keys and counters.
 
 Each endpoint requires four distinct regular files. The client's outbound key
 must initially match the server's inbound key, and vice versa. Counters retain
@@ -97,3 +97,19 @@ was tested. Crash/power-loss recovery and file-system failure injection were not
 tested. These checks are regression coverage for the implemented corrections,
 not an independent cryptographic or exhaustive security audit. The bundled Binn
 source remains in the repository but is no longer used to parse network packets.
+
+## Follow-up: remove the cleartext protocol signature
+
+Removed the four-byte `UTN2` prefix at the user's request. The wire header is now
+10 bytes: the key offset starts at byte 0, the payload length at byte 8, and the
+ciphertext at byte 10. Each datagram is four bytes shorter. The length field is
+retained, and HMAC still authenticates the entire header and ciphertext.
+
+Bounds checks, peer filtering, authentication before key consumption, and replay
+protection remain in place. The receiver no longer performs a magic-byte check.
+The visible offset, length, and traffic patterns can still identify structure;
+removing the signature does not conceal all protocol metadata.
+
+Regression coverage now asserts the exact wire length and header offsets and
+rejects a legacy signature-prefixed packet, in addition to the existing mutation,
+truncation, replay, and key-state tests.
