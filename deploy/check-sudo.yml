@@ -1,0 +1,21 @@
+---
+- name: Test VPS sudo with a directly entered password
+  hosts: deb
+  gather_facts: false
+  vars_prompt:
+    - name: vps_sudo_password
+      prompt: "Sudo password for tech on deb (not the Vault password)"
+      private: true
+  tasks:
+    - name: Verify root access using the entered password
+      become: true
+      vars:
+        ansible_become_password: "{{ vps_sudo_password }}"
+      ansible.builtin.command: id -u
+      changed_when: false
+      register: sudo_identity
+
+    - name: Require root identity
+      ansible.builtin.assert:
+        that:
+          - sudo_identity.stdout | trim == '0'

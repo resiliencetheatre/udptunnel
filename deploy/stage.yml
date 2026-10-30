@@ -1,0 +1,89 @@
+---
+- name: Stage assigned bundles without installing or activating them
+  hosts: mesh
+  gather_facts: false
+  become: false
+  any_errors_fatal: true
+  vars:
+    bundle_root: "{{ playbook_dir }}/../mesh-test"
+  tasks:
+    - name: Check host bundle assignment
+      ansible.builtin.assert:
+        that:
+          - (bundle_name == 'relay' and inventory_hostname in groups['relay']) or (bundle_name is match('^peer-[1-9][0-9]*$') and inventory_hostname in groups['peers'])
+
+    - name: Check required source files on the controller
+      ansible.builtin.stat:
+        path: "{{ bundle_root }}/{{ bundle_name }}/{{ item }}"
+      delegate_to: localhost
+      loop:
+        - install.sh
+        - wg1.netdev
+        - wg1.network
+        - wstunnel-mesh.service
+      register: source_files
+
+    - name: Require generated transport files
+      ansible.builtin.assert:
+        that:
+          - source_files.results[0].stat.isreg | default(false)
+          - source_files.results[1].stat.isreg | default(false)
+          - source_files.results[2].stat.isreg | default(false)
+          - source_files.results[3].stat.isreg | default(false)
+        fail_msg: >-
+          Missing transport bundle at {{ bundle_root }}/{{ bundle_name }}.
+          Generate a separate test bundle as described in deploy/README.md.
+
+    - name: Check endpoint-specific files on the controller
+      ansible.builtin.stat:
+        path: "{{ bundle_root }}/{{ bundle_name }}/{{ item }}"
+      delegate_to: localhost
+      loop: [node.ini, keys, setup.sh, wait-transport.sh, utun-node.service, utun-overlay.service]
+      register: peer_files
+      when: inventory_hostname in groups['peers']
+
+    - name: Require a complete endpoint bundle
+      ansible.builtin.assert:
+        that:
+          - peer_files.results[0].stat.isreg | default(false)
+          - peer_files.results[1].stat.isdir | default(false)
+          - peer_files.results[2].stat.isreg | default(false)
+          - peer_files.results[3].stat.isreg | default(false)
+          - peer_files.results[4].stat.isreg | default(false)
+          - peer_files.results[5].stat.isreg | default(false)
+      when: inventory_hostname in groups['peers']
+
+    - name: Check relay forwarding configuration on the controller
+      ansible.builtin.stat:
+        path: "{{ bundle_root }}/relay/90-otp-relay.conf"
+      delegate_to: localhost
+      register: relay_forwarding
+      when: inventory_hostname in groups['relay']
+
+    - name: Require relay forwarding configuration
+      ansible.builtin.assert:
+        that:
+          - relay_forwarding.stat.isreg | default(false)
+      when: inventory_hostname in groups['relay']
+
+    - name: Create a private staging directory on the target
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: "utun-{{ bundle_name }}-"
+      register: staging
+
+    - name: Copy only this host's assigned bundle
+      ansible.builtin.copy:
+        src: "{{ bundle_root }}/{{ bundle_name }}/"
+        dest: "{{ staging.path }}/"
+        mode: preserve
+        directory_mode: '0700'
+      no_log: true
+      diff: false
+
+    - name: Report staging location
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ bundle_name }} staged at {{ staging.path }}.
+          No installer or service commands were executed. Remove this private
+          directory when finished; it contains secret keys and counter copies.

@@ -1,0 +1,19 @@
+all:
+  children:
+    mesh:
+      children:
+        relay:
+          hosts:
+            deb:
+              ansible_user: tech
+              bundle_name: relay
+        peers:
+          hosts:
+            desk:
+              ansible_connection: local
+              ansible_python_interpreter: "{{ ansible_playbook_python }}"
+              bundle_name: peer-1
+            t490:
+              bundle_name: peer-2
+            fz55:
+              bundle_name: peer-3

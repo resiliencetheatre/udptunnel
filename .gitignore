@@ -23,3 +23,8 @@ __pycache__/
 *.counter
 *.netdev
 transport.json
+
+# Local Ansible credentials (including encrypted Vault files).
+/deploy/host_vars/
+/deploy/group_vars/
+*.retry

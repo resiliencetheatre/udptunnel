@@ -1,0 +1,157 @@
+---
+# Included after sudo and OTP-state checks, before bundle staging.
+- name: Gather operating system and architecture
+  ansible.builtin.setup:
+    gather_subset: [min]
+
+- name: Require a supported provisioning platform
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.os_family == 'Debian'
+      - ansible_facts.service_mgr == 'systemd'
+    fail_msg: Automatic provisioning currently supports Debian/Ubuntu with systemd.
+
+- name: Install transport prerequisites
+  ansible.builtin.apt:
+    name: [wireguard-tools, iproute2, systemd, ca-certificates, tar]
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Check whether networkd is packaged separately
+  ansible.builtin.command: apt-cache show systemd-networkd
+  register: networkd_package
+  changed_when: false
+  failed_when: networkd_package.rc not in [0, 100]
+
+- name: Install separate networkd package when available
+  ansible.builtin.apt:
+    name: systemd-networkd
+    state: present
+  when: networkd_package.rc == 0
+
+- name: Ensure executable installation directory exists
+  ansible.builtin.file:
+    path: /usr/local/bin
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Inspect installed wstunnel
+  ansible.builtin.stat:
+    path: /usr/local/bin/wstunnel
+  register: installed_wstunnel
+
+- name: Install missing wstunnel from a pinned upstream release
+  when: not (installed_wstunnel.stat.executable | default(false))
+  vars:
+    wstunnel_release: '11.1.0'
+    wstunnel_architectures:
+      x86_64: amd64
+      aarch64: arm64
+    wstunnel_base_url: "https://github.com/erebe/wstunnel/releases/download/v{{ wstunnel_release }}"
+  block:
+    - name: Require a supported release architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.architecture in wstunnel_architectures
+
+    - name: Create private release workspace
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: utun-wstunnel-
+      register: wstunnel_workspace
+
+    - name: Download release archive and verify upstream SHA256
+      ansible.builtin.get_url:
+        url: "{{ wstunnel_base_url }}/wstunnel_{{ wstunnel_release }}_linux_{{ wstunnel_architectures[ansible_facts.architecture] }}.tar.gz"
+        checksum: "sha256:{{ wstunnel_base_url }}/checksums.txt"
+        dest: "{{ wstunnel_workspace.path }}/release.tar.gz"
+        mode: '0600'
+
+    - name: Extract release
+      ansible.builtin.unarchive:
+        src: "{{ wstunnel_workspace.path }}/release.tar.gz"
+        dest: "{{ wstunnel_workspace.path }}"
+        remote_src: true
+
+    - name: Install wstunnel executable
+      ansible.builtin.copy:
+        src: "{{ wstunnel_workspace.path }}/wstunnel"
+        dest: /usr/local/bin/wstunnel
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+  always:
+    - name: Remove downloaded release workspace
+      ansible.builtin.file:
+        path: "{{ wstunnel_workspace.path }}"
+        state: absent
+      when: wstunnel_workspace is defined and wstunnel_workspace.path is defined
+
+- name: Inspect endpoint executable
+  ansible.builtin.stat:
+    path: /usr/local/bin/utun-node
+  register: endpoint_executable
+  when: inventory_hostname in groups['peers']
+
+- name: Build missing endpoint executable natively
+  when:
+    - inventory_hostname in groups['peers']
+    - not (endpoint_executable.stat.executable | default(false))
+  block:
+    - name: Install native build dependencies
+      ansible.builtin.apt:
+        name: [build-essential, libssl-dev]
+        state: present
+
+    - name: Create unprivileged build workspace
+      become: false
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: utun-build-
+      register: endpoint_build
+
+    - name: Copy only build inputs from controller
+      become: false
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../{{ item }}"
+        dest: "{{ endpoint_build.path }}/{{ item }}"
+        mode: preserve
+        directory_mode: '0700'
+      loop:
+        - Makefile
+        - node.c
+        - mesh.c
+        - socket.c
+        - tun.c
+        - log.c
+        - log.h
+        - ini.c
+        - ini.h
+        - include/
+
+    - name: Compile endpoint on its own host
+      become: false
+      ansible.builtin.command:
+        argv: [make, utun-node]
+        chdir: "{{ endpoint_build.path }}"
+      changed_when: true
+
+    - name: Install native endpoint executable
+      ansible.builtin.copy:
+        src: "{{ endpoint_build.path }}/utun-node"
+        dest: /usr/local/bin/utun-node
+        remote_src: true
+        owner: root
+        group: root
+        mode: '0755'
+  always:
+    - name: Remove endpoint build workspace
+      become: false
+      ansible.builtin.file:
+        path: "{{ endpoint_build.path }}"
+        state: absent
+      when: endpoint_build is defined and endpoint_build.path is defined

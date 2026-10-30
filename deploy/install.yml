@@ -1,0 +1,168 @@
+---
+- name: Check prerequisites before staging or changing installed state
+  hosts: mesh
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Require a real installation run
+      ansible.builtin.assert:
+        that:
+          - not ansible_check_mode
+          - ansible_play_hosts_all | sort == groups['mesh'] | sort
+        fail_msg: >-
+          Install the full mesh without --limit. Use --syntax-check for validation;
+          check mode is not supported.
+
+    - name: Inspect installed OTP state
+      ansible.builtin.stat:
+        path: /etc/utun
+      register: installed_state
+      when: inventory_hostname in groups['peers']
+
+    - name: Protect existing keys and counters
+      ansible.builtin.assert:
+        that:
+          - not installed_state.stat.exists or (replace_with_fresh_generation | default(false) | bool)
+        fail_msg: >-
+          /etc/utun already exists. Do not overwrite live OTP counters with bundle
+          snapshots. Only for a fresh unused generation and coordinated mesh
+          replacement, pass -e replace_with_fresh_generation=true.
+      when: inventory_hostname in groups['peers']
+
+    - name: Provision missing packages and executables
+      ansible.builtin.import_tasks: provision.yml
+
+    - name: Check deployment tools and binaries
+      ansible.builtin.shell: |
+        set -eu
+        for tool in systemctl systemd-analyze networkctl ip wg install getent; do
+          command -v "$tool" >/dev/null
+        done
+        test -x /usr/local/bin/wstunnel
+        getent group systemd-network >/dev/null
+        systemctl show --property=Version --value >/dev/null
+      changed_when: false
+
+    - name: Check endpoint binary
+      ansible.builtin.command: test -x /usr/local/bin/utun-node
+      changed_when: false
+      when: inventory_hostname in groups['peers']
+
+    - name: Check for conflicting wg-quick manager
+      ansible.builtin.command: systemctl is-active wg-quick@wg1.service
+      register: wg_quick
+      changed_when: false
+      failed_when: wg_quick.rc not in [0, 3, 4]
+
+    - name: Require networkd ownership of wg1
+      ansible.builtin.assert:
+        that:
+          - wg_quick.stdout | trim != 'active'
+        fail_msg: Stop and disable wg-quick@wg1 before using networkd for wg1.
+
+- name: Stage assigned bundles
+  ansible.builtin.import_playbook: stage.yml
+
+- name: Validate all staged bundles before stopping any endpoint
+  hosts: mesh
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Check staged shell syntax before installation
+      ansible.builtin.shell: |
+        set -eu
+        for script in *.sh; do
+          sh -n "$script"
+        done
+      args:
+        chdir: "{{ staging.path }}"
+      changed_when: false
+      no_log: true
+
+    - name: Verify staged units without requiring not-yet-installed helpers
+      ansible.builtin.script:
+        cmd: "{{ playbook_dir }}/verify-staged.py {{ staging.path | quote }}"
+        executable: /usr/bin/python3
+      changed_when: false
+
+- name: Stop OTP on all endpoints before changing the relay
+  hosts: peers
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Inspect existing endpoint services
+      ansible.builtin.service_facts:
+
+    - name: Stop existing managed OTP services
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        state: stopped
+      loop: [utun-node.service, utun-overlay.service]
+      when: item in ansible_facts.services
+
+- name: Install and activate the relay
+  hosts: relay
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+    - name: Install only the relay bundle and activate transport
+      ansible.builtin.command:
+        argv: [/bin/sh, "{{ staging.path }}/install.sh", --start]
+      changed_when: true
+      no_log: true
+
+    - name: Check relay transport service
+      ansible.builtin.command: systemctl is-active wstunnel-mesh.service
+      changed_when: false
+      register: relay_health
+      retries: 5
+      delay: 3
+      until: relay_health.rc == 0
+
+- name: Install and activate staged peer bundles
+  hosts: peers
+  gather_facts: false
+  become: true
+  any_errors_fatal: true
+  tasks:
+
+    - name: Reserve installed state before attempting installation
+      ansible.builtin.file:
+        path: /etc/utun
+        state: directory
+        owner: root
+        group: root
+        mode: '0700'
+
+    - name: Run generated installer and activate services
+      ansible.builtin.command:
+        argv:
+          - /bin/sh
+          - "{{ staging.path }}/install.sh"
+          - --start
+      changed_when: true
+      no_log: true
+
+    - name: Verify managed services stay active
+      ansible.builtin.command:
+        argv:
+          - systemctl
+          - is-active
+          - "{{ item }}"
+      loop: [wstunnel-mesh.service, utun-overlay.service, utun-node.service]
+      changed_when: false
+      register: service_health
+      retries: 5
+      delay: 3
+      until: service_health.rc == 0
+
+    - name: Report installation
+      ansible.builtin.debug:
+        msg: >-
+          {{ inventory_hostname }}: {{ bundle_name }} installed and services active.
+          Verify WireGuard handshakes and overlay connectivity with matching peers.
+          Staging remains at {{ staging.path }}; do not reinstall used OTP snapshots.
