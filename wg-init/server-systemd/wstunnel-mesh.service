@@ -1,0 +1,17 @@
+[Unit]
+Description=wstunnel server for @IFACE@
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+#Environment=NO_COLOR=true
+DynamicUser=yes
+ExecStart=@BINARY@ server --restrict-to 127.0.0.1:@WG_PORT@ --restrict-http-upgrade-path-prefix @PREFIX@ wss://@BIND@:@WS_PORT@
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -3,9 +3,12 @@
 Status: static IPv4 mesh implemented on the `future` branch, 2026-10-29.
 This document retains the architecture and sizing discussion. `utun-node` now
 implements a shared TUN, static peer selection, independent key state, and inner
-source/destination enforcement. Test bundles and WireGuard templates are generated
+source/destination enforcement. Test bundles and complete WireGuard/wstunnel configs are generated
 by `make test-bundles PEERS=N`. See [the README](../README.md) for current usage.
-Discovery, roaming, rotation, and replay-window improvements remain future work.
+Discovery, roaming, online key rotation, and replay-window improvements remain
+future work. Test regeneration replaces all bundle keys/configs automatically;
+this is coordinated offline reprovisioning, not online rotation. WSS encapsulation
+and systemd-networkd deployment are described in the README.
 
 ## Objective
 
@@ -277,3 +280,18 @@ TUN/WireGuard relay integration test in disposable namespaces. All 992 directed
 overlay pings and an MTU-sized packet passed; relay captures showed inner encrypted
 UDP packets. These tests do not constitute a cryptographic audit or production
 performance/crash-recovery validation. No external VPS was deployed.
+
+
+## WireGuard over WSS provisioning
+
+`make test-bundles` now invokes the `wg-init/` generators and replaces the previous
+complete generated bundle without confirmation. It produces fresh WireGuard keys,
+per-peer PSKs, a matching WSS upgrade path token, networkd configs and systemd
+services alongside the OTP bundles. Default transport is WSS TCP 8443 carrying
+WireGuard UDP 51871. WireGuard MTU 1200 and OTP MTU 1128 avoid inner fragmentation.
+
+The generated WSS deployment was tested with 32 isolated endpoint namespaces:
+all 992 directed overlay pings, an MTU-sized packet, and relay ciphertext capture
+passed. Generated service syntax was verified. This is local integration coverage,
+not deployment to the external VPS. See `agents.md` and the README for status and
+installation instructions.

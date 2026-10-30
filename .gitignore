@@ -16,3 +16,10 @@ tests/test_transport_sanitize
 __pycache__/
 
 /utun-node
+/.mesh-test.lock
+
+# Generated key material and mutable OTP state, wherever bundles are written.
+*.key
+*.counter
+*.netdev
+transport.json

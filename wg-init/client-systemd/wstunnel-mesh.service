@@ -1,0 +1,16 @@
+[Unit]
+Description=wstunnel client for @IFACE@
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+#Environment=NO_COLOR=true
+ExecStart=@BINARY@ client --http-upgrade-path-prefix @PREFIX@ -L udp://127.0.0.1:@WG_PORT@:127.0.0.1:@WG_PORT@?timeout_sec=0 wss://@HOST@:@WS_PORT@
+Restart=always
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

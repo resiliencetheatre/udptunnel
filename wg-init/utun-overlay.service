@@ -1,0 +1,13 @@
+[Unit]
+Description=OTP mesh interface and routes
+Wants=network-online.target
+After=network-online.target systemd-networkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/libexec/utun-setup up
+ExecStop=/usr/local/libexec/utun-setup down
+
+[Install]
+WantedBy=multi-user.target

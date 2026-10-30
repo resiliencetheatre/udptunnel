@@ -1,0 +1,15 @@
+[Unit]
+Description=End-to-end OTP mesh node
+Requires=utun-overlay.service
+Wants=wstunnel-mesh.service
+After=utun-overlay.service wstunnel-mesh.service systemd-networkd.service
+
+[Service]
+Type=simple
+ExecStartPre=/usr/local/libexec/utun-wait-transport
+ExecStart=/usr/local/bin/utun-node -i /etc/utun/node.ini
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

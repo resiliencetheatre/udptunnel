@@ -106,15 +106,28 @@ legacy-test-bundles:
 
 .PHONY: test-bundles
 
-# Full-mesh endpoint bundles; existing output directories are never overwritten.
+# Regenerate complete test bundles, replacing previous generated state without prompting.
 PEERS ?= 3
 KEY_BYTES ?= 1000000
 BUNDLE_DIR ?= mesh-test
-TRANSPORT_NETWORK ?= 10.0.0.0/24
+TRANSPORT_NETWORK ?= 10.1.0.0/24
 OVERLAY_NETWORK ?= 10.50.0.0/24
+VPS_HOST ?= vps.example.net
+WSS_PORT ?= 8444
+WSS_BIND ?= 0.0.0.0
+WG_PORT ?= 51872
+WG_IFACE ?= wg1
+WG_MTU ?= 1200
+OTP_MTU ?= 1128
+SERVER_WSTUNNEL_BIN ?= /usr/local/bin/wstunnel
+CLIENT_WSTUNNEL_BIN ?= /usr/local/bin/wstunnel
+
 test-bundles: mesh-test-bundles
 mesh-test-bundles:
-	python3 scripts/provision_mesh.py --peers "$(PEERS)" --key-bytes "$(KEY_BYTES)" --output "$(BUNDLE_DIR)" --transport-network "$(TRANSPORT_NETWORK)" --overlay-network "$(OVERLAY_NETWORK)"
+	python3 scripts/provision_mesh.py --peers "$(PEERS)" --key-bytes "$(KEY_BYTES)" --output "$(BUNDLE_DIR)" --transport-network "$(TRANSPORT_NETWORK)" --overlay-network "$(OVERLAY_NETWORK)" \
+	  --vps-host "$(VPS_HOST)" --wg-interface "$(WG_IFACE)" --wss-port "$(WSS_PORT)" --wss-bind "$(WSS_BIND)" \
+	  --wg-port "$(WG_PORT)" --wg-mtu "$(WG_MTU)" --mtu "$(OTP_MTU)" \
+	  --server-wstunnel-bin "$(SERVER_WSTUNNEL_BIN)" --client-wstunnel-bin "$(CLIENT_WSTUNNEL_BIN)"
 
 .PHONY: legacy legacy-test-bundles mesh-test-bundles
 
@@ -124,3 +137,8 @@ NETWORK_PEERS ?= 3
 test-network: utun-node
 	python3 tests/test_mesh_network.py --peers "$(NETWORK_PEERS)"
 .PHONY: test-network
+
+# Exercise the generated WG keys/configs and wstunnel ExecStart commands over WSS.
+test-wstunnel: utun-node
+	python3 tests/test_mesh_network.py --wstunnel --peers "$(NETWORK_PEERS)"
+.PHONY: test-wstunnel
