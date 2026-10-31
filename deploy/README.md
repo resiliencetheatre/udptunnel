@@ -37,14 +37,17 @@ Secret copies and installer output are suppressed from Ansible logs.
 
 ## Install and activate
 
-On Debian/Ubuntu systemd hosts, Ansible installs transport packages and missing
-executables automatically. Missing wstunnel is downloaded from pinned upstream
-release 11.1.0 with its SHA256 checked against upstream checksums. Automatic
-wstunnel downloads support x86_64 and aarch64. Existing executable binaries are
-retained. Missing utun-node is built natively on each endpoint from an explicit
-list of repository source files, using build-essential and libssl-dev; the relay
-does not receive endpoint source or OTP material. Build/download workspaces are
-removed afterward. Package installation and downloads need network access.
+Build and install wstunnel yourself at `/usr/local/bin/wstunnel` on every mesh
+host, including the relay, before deployment. Ansible checks that this path is
+an executable file and aborts if it is missing or not executable. It never
+downloads, installs or replaces wstunnel.
+
+On Debian/Ubuntu systemd hosts, Ansible installs transport packages automatically.
+Missing utun-node is built natively on each endpoint from an explicit list of
+repository source files, using build-essential and libssl-dev; existing
+executable binaries are retained. The relay does not receive endpoint source or
+OTP material. Build workspaces are removed afterward. Package installation
+needs network access.
 
 Python 3 and sudo must already work. Other operating systems currently require
 separate provisioning support. This playbook supports the default
@@ -64,7 +67,8 @@ ansible-playbook -i deploy/inventory.yml deploy/install.yml --ask-become-pass
 
 The installation playbook:
 
-1. Checks sudo and existing endpoint state, installs missing prerequisites and binaries.
+1. Checks sudo, existing endpoint state and wstunnel availability, then installs
+   missing packages and builds missing endpoint binaries.
 2. Stages and validates all bundles before stopping any services.
 3. Stops managed OTP services on every endpoint.
 4. Installs and activates deb's relay transport and IPv4 forwarding.

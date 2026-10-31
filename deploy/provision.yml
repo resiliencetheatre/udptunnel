@@ -1,6 +1,21 @@
 ---
 # Included after sudo and OTP-state checks, before bundle staging.
-- name: Gather operating system and architecture
+- name: Inspect installed wstunnel
+  ansible.builtin.stat:
+    path: /usr/local/bin/wstunnel
+    follow: true
+  register: installed_wstunnel
+
+- name: Require a self-compiled wstunnel installation
+  ansible.builtin.assert:
+    that:
+      - installed_wstunnel.stat.isreg | default(false)
+      - installed_wstunnel.stat.executable | default(false)
+    fail_msg: >-
+      Build and install wstunnel at /usr/local/bin/wstunnel on every mesh host
+      before deployment. Ansible does not download or install wstunnel.
+
+- name: Gather operating system facts
   ansible.builtin.setup:
     gather_subset: [min]
 
@@ -13,7 +28,7 @@
 
 - name: Install transport prerequisites
   ansible.builtin.apt:
-    name: [wireguard-tools, iproute2, systemd, ca-certificates, tar]
+    name: [wireguard-tools, iproute2, systemd]
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -37,59 +52,6 @@
     owner: root
     group: root
     mode: '0755'
-
-- name: Inspect installed wstunnel
-  ansible.builtin.stat:
-    path: /usr/local/bin/wstunnel
-  register: installed_wstunnel
-
-- name: Install missing wstunnel from a pinned upstream release
-  when: not (installed_wstunnel.stat.executable | default(false))
-  vars:
-    wstunnel_release: '11.1.0'
-    wstunnel_architectures:
-      x86_64: amd64
-      aarch64: arm64
-    wstunnel_base_url: "https://github.com/erebe/wstunnel/releases/download/v{{ wstunnel_release }}"
-  block:
-    - name: Require a supported release architecture
-      ansible.builtin.assert:
-        that:
-          - ansible_facts.architecture in wstunnel_architectures
-
-    - name: Create private release workspace
-      ansible.builtin.tempfile:
-        state: directory
-        prefix: utun-wstunnel-
-      register: wstunnel_workspace
-
-    - name: Download release archive and verify upstream SHA256
-      ansible.builtin.get_url:
-        url: "{{ wstunnel_base_url }}/wstunnel_{{ wstunnel_release }}_linux_{{ wstunnel_architectures[ansible_facts.architecture] }}.tar.gz"
-        checksum: "sha256:{{ wstunnel_base_url }}/checksums.txt"
-        dest: "{{ wstunnel_workspace.path }}/release.tar.gz"
-        mode: '0600'
-
-    - name: Extract release
-      ansible.builtin.unarchive:
-        src: "{{ wstunnel_workspace.path }}/release.tar.gz"
-        dest: "{{ wstunnel_workspace.path }}"
-        remote_src: true
-
-    - name: Install wstunnel executable
-      ansible.builtin.copy:
-        src: "{{ wstunnel_workspace.path }}/wstunnel"
-        dest: /usr/local/bin/wstunnel
-        remote_src: true
-        owner: root
-        group: root
-        mode: '0755'
-  always:
-    - name: Remove downloaded release workspace
-      ansible.builtin.file:
-        path: "{{ wstunnel_workspace.path }}"
-        state: absent
-      when: wstunnel_workspace is defined and wstunnel_workspace.path is defined
 
 - name: Inspect endpoint executable
   ansible.builtin.stat:

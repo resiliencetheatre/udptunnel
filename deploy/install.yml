@@ -30,7 +30,7 @@
           replacement, pass -e replace_with_fresh_generation=true.
       when: inventory_hostname in groups['peers']
 
-    - name: Provision missing packages and executables
+    - name: Check wstunnel and provision missing packages and endpoint executables
       ansible.builtin.import_tasks: provision.yml
 
     - name: Check deployment tools and binaries
